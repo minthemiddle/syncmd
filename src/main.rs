@@ -10,12 +10,11 @@ mod security;
 use clap::Parser;
 use cli::{Cli, Commands, Config};
 use indexer::FileIndexer;
-use network::{DeviceManager, NetworkManager, NetworkMessage};
+use network::{ClientManager, NetworkManager, NetworkMessage};
 use sync::SyncEngine;
-use security::SecurityManager;
 use std::sync::Arc;
 use tokio::signal;
-use watcher::FileWatcher;
+use watcher::{FileWatcher, WatchEvent};
 use file_transfer::FileTransferManager;
 
 #[tokio::main]
@@ -26,20 +25,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
         
     match cli.command {
-        Commands::Sync { path, connect, server, discover, port, discovery_port } => {
-            sync_folder(path, connect, server, discover, port, discovery_port).await?;
+        Commands::Sync { path, connect, server, port } => {
+            sync_folder(path, connect, server, port).await?;
         }
-        Commands::ListDevices => {
-            list_devices().await?;
+        Commands::ListClients => {
+            list_clients().await?;
         }
         Commands::Status => {
             show_status().await?;
         }
-        Commands::Discover { port } => {
-            discover_peers(port).await?;
-        }
-        Commands::Init { path, name, encryption, password } => {
-            init_config(path, name, encryption, password).await?;
+        Commands::Init { path, name, auth_token } => {
+            init_config(path, name, auth_token).await?;
         }
     }
     
@@ -50,63 +46,28 @@ async fn sync_folder(
     path: std::path::PathBuf,
     connect: Option<String>,
     server_mode: bool,
-    discover_mode: bool,
     port: u16,
-    discovery_port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
-    let device_manager = Arc::new(DeviceManager::new(config.device_name.clone()));
+    let client_manager = Arc::new(ClientManager::new());
     
     println!("Starting sync for folder: {:?}", path);
-    println!("Device ID: {}", device_manager.device_id());
-    println!("Device Name: {}", device_manager.device_name());
+    println!("Server ID: {}", client_manager.server_id());
+    println!("Client Name: {}", config.device_name);
     
-    let indexer = FileIndexer::new(device_manager.device_id().to_string(), path.clone());
-    let sync_engine = SyncEngine::new(device_manager.device_id().to_string());
+    let indexer = FileIndexer::new(client_manager.server_id().to_string(), path.clone());
+    let sync_engine = SyncEngine::new(client_manager.server_id().to_string());
     
     // Initial indexing
     let sync_state = indexer.index_directory()?;
     println!("Indexed {} files", sync_state.local_files.len());
     
     let network_manager = NetworkManager::new(
-        device_manager.clone(),
+        client_manager.clone(),
         format!("0.0.0.0:{}", port),
     );
     
-    if discover_mode {
-        println!("Starting peer discovery mode");
-        
-        // Start discovery server
-        network_manager.start_discovery_server(discovery_port).await?;
-        
-        // Start sync server
-        println!("Starting sync server on port {}", port);
-        let server_manager = network_manager.clone();
-        tokio::spawn(async move {
-            if let Err(e) = server_manager.start_server().await {
-                eprintln!("Server error: {}", e);
-            }
-        });
-        
-        // Periodically discover and connect to peers
-        let discovery_manager = network_manager.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-            loop {
-                interval.tick().await;
-                if let Ok(peers) = discovery_manager.discover_peers(discovery_port).await {
-                    for peer in peers {
-                        println!("Found peer: {}", peer);
-                        // Here you would establish connection and sync
-                    }
-                }
-            }
-        });
-        
-        // Wait for Ctrl+C
-        signal::ctrl_c().await?;
-        println!("Shutting down discovery mode...");
-    } else if server_mode {
+    if server_mode {
         println!("Starting server on port {}", port);
         tokio::spawn(async move {
             if let Err(e) = network_manager.start_server().await {
@@ -123,14 +84,16 @@ async fn sync_folder(
         let mut stream = network_manager.connect_to_server(&server_addr).await?;
         
         // Calculate root hash for handshake
-        let root_hash = calculate_root_hash(&sync_state)?;
+        let _root_hash = calculate_root_hash(&sync_state)?;
         
-        // Send handshake
-        network_manager.send_handshake(&mut stream, root_hash).await?;
+        // Send authentication
+        let auth_token = config.auth_token.clone()
+            .ok_or("Authentication token required. Please run 'syncmd init' with --auth-token.")?;
+        network_manager.send_authentication(&mut stream, auth_token, config.device_name.clone()).await?;
         println!("Connected to server successfully");
         
         // Start file watcher for real-time sync
-        let file_watcher = FileWatcher::new(path.clone())?;
+        let mut file_watcher = FileWatcher::new(path.clone())?;
         println!("Started file watcher for: {:?}", path);
         
         // Start periodic sync
@@ -142,22 +105,36 @@ async fn sync_folder(
         let watcher_sync_stream = sync_stream.clone();
         let watcher_indexer = sync_indexer.clone();
         let watcher_engine = sync_engine_clone.clone();
+        let watcher_path = path.clone();
         
         tokio::spawn(async move {
             let mut last_sync = std::time::Instant::now();
-            let mut file_watcher = file_watcher; // Move into the task
             
             loop {
-                if let Some(event) = file_watcher.next_event().await {
-                    println!("File event: {:?}", event);
-                    
-                    // Debounce rapid changes
-                    if last_sync.elapsed() > std::time::Duration::from_secs(2) {
-                        if let Ok(mut stream) = watcher_sync_stream.try_lock() {
-                            if let Err(e) = perform_sync(&watcher_indexer, &watcher_engine, &mut stream).await {
-                                eprintln!("Real-time sync error: {}", e);
+                if let Some(event) = file_watcher.next_event_debounced().await {
+                    // Check if this event should trigger a sync
+                    if file_watcher.should_sync_event(&event) {
+                        println!("File event: {:?}", event);
+                        
+                        // Get relative path for logging
+                        if let Some(relative_path) = file_watcher.get_relative_path(
+                            match &event {
+                                WatchEvent::Created(p) | WatchEvent::Modified(p) | WatchEvent::Deleted(p) => p,
+                                WatchEvent::Renamed(_, new) => new,
+                            },
+                            &watcher_path
+                        ) {
+                            println!("Relative path: {:?}", relative_path);
+                        }
+                        
+                        // Debounce rapid changes
+                        if last_sync.elapsed() > std::time::Duration::from_secs(1) {
+                            if let Ok(mut stream) = watcher_sync_stream.try_lock() {
+                                if let Err(e) = perform_sync(&watcher_indexer, &watcher_engine, &mut stream).await {
+                                    eprintln!("Real-time sync error: {}", e);
+                                }
+                                last_sync = std::time::Instant::now();
                             }
-                            last_sync = std::time::Instant::now();
                         }
                     }
                 }
@@ -203,7 +180,7 @@ async fn perform_sync(
     
     // Send sync request
     let sync_request = NetworkMessage::SyncRequest {
-        device_id: sync_state.device_id.clone(),
+        client_id: sync_state.device_id.clone(),
         files: sync_state.local_files.values().cloned().collect(),
     };
     
@@ -253,18 +230,18 @@ async fn perform_sync(
     Ok(())
 }
 
-async fn list_devices() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load()?;
-    let device_manager = DeviceManager::new(config.device_name.clone());
+async fn list_clients() -> Result<(), Box<dyn std::error::Error>> {
+    let _config = Config::load()?;
+    let client_manager = ClientManager::new();
     
-    let devices = device_manager.list_devices().await;
+    let clients = client_manager.list_clients().await;
     
-    if devices.is_empty() {
-        println!("No connected devices");
+    if clients.is_empty() {
+        println!("No connected clients");
     } else {
-        println!("Connected devices:");
-        for device in devices {
-            println!("  - {} ({}) at {}", device.name, device.id, device.address);
+        println!("Connected clients:");
+        for client in clients {
+            println!("  - {} ({}) at {}", client.name, client.id, client.address);
         }
     }
     
@@ -289,58 +266,26 @@ async fn show_status() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn discover_peers(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load()?;
-    let device_manager = Arc::new(DeviceManager::new(config.device_name.clone()));
-    let network_manager = NetworkManager::new(device_manager.clone(), "0.0.0.0:0".to_string());
-    
-    println!("Discovering peers on port {}...", port);
-    let peers = network_manager.discover_peers(port).await?;
-    
-    if peers.is_empty() {
-        println!("No peers found on the network");
-    } else {
-        println!("Found {} peers:", peers.len());
-        for peer in peers {
-            println!("  - {}", peer);
-        }
-    }
-    
-    Ok(())
-}
 
 async fn init_config(
     path: std::path::PathBuf,
     name: String,
-    encryption: bool,
-    password: Option<String>,
+    auth_token: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::load()?;
     config.device_name = name;
     
-    if encryption {
-        let password = password.ok_or("Password required for encryption")?;
-        println!("Setting up encryption...");
-        
-        // Generate device ID for encryption
-        let device_id = security::generate_device_id();
-        config.device_id = device_id;
-        
-        // Create security manager and credentials
-        let security_manager = SecurityManager::new(&password, config.device_id.clone())?;
-        config.credentials = Some(security_manager.get_credentials().clone());
-        config.encryption_enabled = true;
-        
-        println!("Encryption enabled. Your device ID is: {}", config.device_id);
-        println!("IMPORTANT: Save your password securely. You'll need it to decrypt your data.");
+    if let Some(token) = auth_token {
+        println!("Setting up authentication...");
+        config.auth_token = Some(token);
+        println!("Authentication token configured");
     }
     
     config.add_sync_root(path);
     config.save()?;
     
     println!("Configuration initialized successfully");
-    println!("Device ID: {}", config.device_id);
-    println!("Device Name: {}", config.device_name);
+    println!("Client Name: {}", config.device_name);
     
     Ok(())
 }

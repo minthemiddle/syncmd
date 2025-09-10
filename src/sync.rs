@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::types::{SyncError, SyncOperation, FileMetadata};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,8 +25,13 @@ impl SyncEngine {
             if let Some(remote_meta) = remote_files.get(path) {
                 // File exists on both sides, check if update is needed
                 if local_meta.hash != remote_meta.hash {
-                    // Conflict resolution: newer version wins
-                    if local_meta.version > remote_meta.version {
+                    // Conflict resolution: newer version wins based on timestamp
+                    if local_meta.modified > remote_meta.modified {
+                        operations.push(SyncOperation::Update(local_meta.clone()));
+                    } else if remote_meta.modified > local_meta.modified {
+                        operations.push(SyncOperation::Update(remote_meta.clone()));
+                    } else {
+                        // Same timestamp, prefer local version
                         operations.push(SyncOperation::Update(local_meta.clone()));
                     }
                 }
@@ -87,7 +94,7 @@ impl SyncEngine {
         // Extract YAML frontmatter if present
         let (local_frontmatter, local_body) = Self::extract_frontmatter(local_content);
         let (remote_frontmatter, remote_body) = Self::extract_frontmatter(remote_content);
-        let (base_frontmatter, base_body) = Self::extract_frontmatter(base_content);
+        let (_base_frontmatter, base_body) = Self::extract_frontmatter(base_content);
 
         // Merge frontmatter (simple strategy: remote wins for now)
         let merged_frontmatter = if remote_frontmatter.is_empty() {
@@ -131,5 +138,79 @@ impl SyncEngine {
 
         // For now, prefer remote content (can be improved later)
         Ok(remote.to_string())
+    }
+
+    pub fn calculate_bidirectional_sync(
+        &self,
+        local_files: &HashMap<PathBuf, FileMetadata>,
+        remote_files: &HashMap<PathBuf, FileMetadata>,
+    ) -> (Vec<SyncOperation>, Vec<SyncOperation>) {
+        let mut local_operations = Vec::new();
+        let mut remote_operations = Vec::new();
+
+        for (path, local_meta) in local_files {
+            if let Some(remote_meta) = remote_files.get(path) {
+                // File exists on both sides
+                if local_meta.hash != remote_meta.hash {
+                    // Conflict resolution based on timestamps
+                    if local_meta.modified > remote_meta.modified {
+                        // Local is newer, push to remote
+                        remote_operations.push(SyncOperation::Update(local_meta.clone()));
+                    } else if remote_meta.modified > local_meta.modified {
+                        // Remote is newer, pull to local
+                        local_operations.push(SyncOperation::Update(remote_meta.clone()));
+                    } else {
+                        // Same timestamp, prefer local version
+                        remote_operations.push(SyncOperation::Update(local_meta.clone()));
+                    }
+                }
+            } else {
+                // File only exists locally, push to remote
+                remote_operations.push(SyncOperation::Add(local_meta.clone()));
+            }
+        }
+
+        for (path, remote_meta) in remote_files {
+            if !local_files.contains_key(path) {
+                // File only exists remotely, pull to local
+                local_operations.push(SyncOperation::Add(remote_meta.clone()));
+            }
+        }
+
+        // Handle deletions
+        for path in local_files.keys() {
+            if !remote_files.contains_key(path) {
+                // File was deleted locally, delete from remote
+                remote_operations.push(SyncOperation::Delete(path.clone()));
+            }
+        }
+
+        for path in remote_files.keys() {
+            if !local_files.contains_key(path) {
+                // File was deleted remotely, delete from local
+                local_operations.push(SyncOperation::Delete(path.clone()));
+            }
+        }
+
+        (local_operations, remote_operations)
+    }
+
+    pub fn merge_markdown_files_with_conflict_resolution(
+        &self,
+        local_content: &str,
+        remote_content: &str,
+        base_content: &str,
+        local_meta: &FileMetadata,
+        remote_meta: &FileMetadata,
+    ) -> Result<String, SyncError> {
+        // Simple conflict resolution: newer version wins
+        if local_meta.modified > remote_meta.modified {
+            Ok(local_content.to_string())
+        } else if remote_meta.modified > local_meta.modified {
+            Ok(remote_content.to_string())
+        } else {
+            // Same timestamp, try to merge
+            Self::merge_markdown_content(local_content, remote_content, base_content)
+        }
     }
 }

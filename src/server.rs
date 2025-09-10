@@ -8,7 +8,7 @@ mod security;
 use clap::Parser;
 use cli::{Cli, Commands, Config};
 use indexer::FileIndexer;
-use network::{DeviceManager, NetworkManager};
+use network::{ClientManager, NetworkManager};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -34,22 +34,22 @@ async fn start_server(
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
-    let device_manager = Arc::new(DeviceManager::new(config.device_name.clone()));
+    let client_manager = Arc::new(ClientManager::new());
     
     println!("Starting syncmd server");
-    println!("Device ID: {}", device_manager.device_id());
-    println!("Device Name: {}", device_manager.device_name());
+    println!("Server ID: {}", client_manager.server_id());
+    println!("Server Name: {}", config.device_name);
     println!("Sync path: {:?}", path);
     println!("Port: {}", port);
     
-    let indexer = FileIndexer::new(device_manager.device_id().to_string(), path.clone());
+    let indexer = FileIndexer::new(client_manager.server_id().to_string(), path.clone());
     
     // Initial indexing
     let sync_state = indexer.index_directory()?;
     println!("Indexed {} files", sync_state.local_files.len());
     
     let network_manager = NetworkManager::new(
-        device_manager.clone(),
+        client_manager.clone(),
         format!("0.0.0.0:{}", port),
     );
     

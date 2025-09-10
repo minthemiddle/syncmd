@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::types::{FileMetadata, SyncError, SyncState};
 use blake3::hash;
 use std::fs;
@@ -5,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
+#[allow(dead_code)]
 pub struct FileIndexer {
     device_id: String,
     sync_root: PathBuf,
@@ -31,8 +34,7 @@ impl FileIndexer {
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
-            if path.is_file() && (path.extension().and_then(|s| s.to_str()) == Some("md") || 
-                                 Self::is_image_file(path)) {
+            if path.is_file() && self.should_sync_file(path) {
                 if let Ok(metadata) = self.get_file_metadata(path) {
                     local_files.insert(path.strip_prefix(&self.sync_root)?.to_path_buf(), metadata);
                 }
@@ -70,10 +72,24 @@ impl FileIndexer {
             .unwrap_or(false)
     }
 
+    fn should_sync_file(&self, path: &Path) -> bool {
+        if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+            match ext.to_lowercase().as_str() {
+                // Markdown files
+                "md" | "markdown" | "mdown" | "mkdn" | "mkd" | "mdwn" | "mdtxt" | "mdtext" | "text" => true,
+                // Image files
+                "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "bmp" | "ico" => true,
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
     fn is_image_file(path: &Path) -> bool {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| matches!(ext.to_lowercase().as_str(), "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp"))
+            .map(|ext| matches!(ext.to_lowercase().as_str(), "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "bmp" | "ico"))
             .unwrap_or(false)
     }
 
@@ -99,5 +115,52 @@ impl FileIndexer {
     pub fn delete_file(&self, relative_path: &Path) -> Result<(), SyncError> {
         let full_path = self.sync_root.join(relative_path);
         Ok(fs::remove_file(full_path)?)
+    }
+
+    pub fn get_file_changes(&self, old_state: &SyncState) -> Vec<crate::types::SyncOperation> {
+        let mut operations = Vec::new();
+        
+        // Get current state
+        let current_state = match self.index_directory() {
+            Ok(state) => state,
+            Err(_) => return operations,
+        };
+        
+        // Find new or modified files
+        for (path, current_meta) in &current_state.local_files {
+            match old_state.local_files.get(path) {
+                Some(old_meta) => {
+                    if current_meta.hash != old_meta.hash {
+                        operations.push(crate::types::SyncOperation::Update(current_meta.clone()));
+                    }
+                }
+                None => {
+                    operations.push(crate::types::SyncOperation::Add(current_meta.clone()));
+                }
+            }
+        }
+        
+        // Find deleted files
+        for path in old_state.local_files.keys() {
+            if !current_state.local_files.contains_key(path) {
+                operations.push(crate::types::SyncOperation::Delete(path.clone()));
+            }
+        }
+        
+        operations
+    }
+
+    pub fn is_text_file(&self, path: &Path) -> bool {
+        if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+            matches!(ext.to_lowercase().as_str(), 
+                "md" | "markdown" | "mdown" | "mkdn" | "mkd" | "mdwn" | "mdtxt" | "mdtext" | "text")
+        } else {
+            false
+        }
+    }
+
+    pub fn get_file_size(&self, relative_path: &Path) -> Result<u64, SyncError> {
+        let full_path = self.sync_root.join(relative_path);
+        Ok(fs::metadata(full_path)?.len())
     }
 }

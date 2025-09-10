@@ -1,80 +1,55 @@
-use crate::types::SyncError;
-use sha2::{Sha256, Digest};
-use serde::{Serialize, Deserialize};
-use base64::{Engine as _, engine::general_purpose};
+#![allow(dead_code)]
 
-const SALT_LEN: usize = 32;
-const KEY_LEN: usize = 32;
+use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceCredentials {
-    pub device_id: String,
-    pub password_hash: String,
-    pub salt: Vec<u8>,
+pub struct AuthToken {
+    pub token: String,
+    pub client_id: String,
+    pub client_name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-pub struct SecurityManager {
-    device_credentials: DeviceCredentials,
+pub struct AuthManager {
+    tokens: std::collections::HashMap<String, AuthToken>, // token -> AuthToken
 }
 
-impl SecurityManager {
-    pub fn new(password: &str, device_id: String) -> Result<Self, SyncError> {
-        // Generate salt
-        let salt: [u8; SALT_LEN] = rand::random();
+impl AuthManager {
+    pub fn new() -> Self {
+        Self {
+            tokens: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn generate_token(&mut self, client_id: String, client_name: String) -> String {
+        use uuid::Uuid;
+        let token = format!("syncmd_{}", Uuid::new_v4().to_string());
         
-        // Hash password
-        let password_hash = Self::hash_password(password, &salt)?;
-        
-        let device_credentials = DeviceCredentials {
-            device_id: device_id.clone(),
-            password_hash,
-            salt: salt.to_vec(),
+        let auth_token = AuthToken {
+            token: token.clone(),
+            client_id: client_id.clone(),
+            client_name,
             created_at: chrono::Utc::now(),
         };
         
-        Ok(Self {
-            device_credentials,
-        })
+        self.tokens.insert(token.clone(), auth_token);
+        token
     }
-    
-    pub fn load_credentials(password: &str, credentials: DeviceCredentials) -> Result<Self, SyncError> {
-        // Verify password
-        let password_hash = Self::hash_password(password, &credentials.salt)?;
-        if password_hash != credentials.password_hash {
-            return Err(SyncError::Network("Invalid password".to_string()));
-        }
-        
-        Ok(Self {
-            device_credentials: credentials,
-        })
+
+    pub fn validate_token(&self, token: &str) -> Option<&AuthToken> {
+        self.tokens.get(token)
     }
-    
-    pub fn get_credentials(&self) -> &DeviceCredentials {
-        &self.device_credentials
+
+    pub fn revoke_token(&mut self, token: &str) -> bool {
+        self.tokens.remove(token).is_some()
     }
-    
-    pub fn verify_password(&self, password: &str) -> Result<bool, SyncError> {
-        let password_hash = Self::hash_password(password, &self.device_credentials.salt)?;
-        Ok(password_hash == self.device_credentials.password_hash)
-    }
-    
-    fn hash_password(password: &str, salt: &[u8]) -> Result<String, SyncError> {
-        let mut hasher = Sha256::new();
-        hasher.update(password.as_bytes());
-        hasher.update(salt);
-        Ok(format!("{:x}", hasher.finalize()))
+
+    pub fn list_tokens(&self) -> Vec<&AuthToken> {
+        self.tokens.values().collect()
     }
 }
 
-pub fn generate_device_id() -> String {
-    let device_id: [u8; 16] = rand::random();
-    format!("syncmd_{}", general_purpose::STANDARD.encode(&device_id))
-}
-
-pub fn hash_password(password: &str, salt: &[u8]) -> Result<String, SyncError> {
-    let mut hasher = Sha256::new();
-    hasher.update(password.as_bytes());
-    hasher.update(salt);
-    Ok(format!("{:x}", hasher.finalize()))
+pub fn generate_client_id() -> String {
+    use uuid::Uuid;
+    format!("client_{}", Uuid::new_v4().to_string())
 }

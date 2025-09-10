@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod types;
 mod indexer;
 mod sync;
@@ -9,7 +11,7 @@ mod security;
 use clap::Parser;
 use cli::{Cli, Commands, Config};
 // use indexer::FileIndexer;
-use network::{DeviceManager, NetworkManager, NetworkMessage};
+use network::{ClientManager, NetworkManager, NetworkMessage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -79,12 +81,12 @@ async fn start_server(
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
-    let device_manager = Arc::new(DeviceManager::new(config.device_name.clone()));
+    let client_manager = Arc::new(ClientManager::new());
     let state = Arc::new(RwLock::new(ServerState::new()));
     
     println!("Starting syncmd VPS server");
-    println!("Device ID: {}", device_manager.device_id());
-    println!("Device Name: {}", device_manager.device_name());
+    println!("Server ID: {}", client_manager.server_id());
+    println!("Server Name: {}", config.device_name);
     println!("Storage path: {:?}", storage_path);
     println!("Port: {}", port);
     
@@ -96,7 +98,7 @@ async fn start_server(
     // Load existing files from storage
     load_existing_files(&state, &storage_path).await?;
     
-    let _network_manager = NetworkManager::new(device_manager.clone(), format!("0.0.0.0:{}", port));
+    let _network_manager = NetworkManager::new(client_manager.clone(), format!("0.0.0.0:{}", port));
     
     println!("VPS server listening on port {}", port);
     
@@ -107,10 +109,10 @@ async fn start_server(
         match listener.accept().await {
             Ok((stream, addr)) => {
                 let state = state.clone();
-                let device_manager = device_manager.clone();
+                let client_manager = client_manager.clone();
                 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client_connection(stream, state, device_manager, addr.to_string()).await {
+                    if let Err(e) = handle_client_connection(stream, state, client_manager, addr.to_string()).await {
                         eprintln!("Client connection error: {}", e);
                     }
                 });
@@ -164,7 +166,7 @@ async fn load_existing_files(
 async fn handle_client_connection(
     mut stream: tokio::net::TcpStream,
     state: Arc<RwLock<ServerState>>,
-    device_manager: Arc<DeviceManager>,
+    _client_manager: Arc<ClientManager>,
     client_addr: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -182,32 +184,26 @@ async fn handle_client_connection(
         let message: NetworkMessage = serde_json::from_slice(&buffer[..n])?;
         
         match message {
-            NetworkMessage::Handshake { device_id, device_name, sync_root_hash: _ } => {
-                println!("Handshake from {} ({})", device_name, device_id);
+            NetworkMessage::Authenticate { token: _, client_name } => {
+                println!("Authentication request from: {}", client_name);
                 
-                let device_info = types::DeviceInfo {
-                    id: device_id.clone(),
-                    name: device_name,
-                    address: client_addr.clone(),
-                    last_seen: chrono::Utc::now(),
-                };
-                
-                device_manager.register_device(device_info).await?;
-                
+                // For VPS server, we'll accept any token for now
                 // Add client to state
-                state.write().await.add_client(device_id.clone(), client_addr.clone());
+                let client_id = format!("client_{}", uuid::Uuid::new_v4());
+                state.write().await.add_client(client_id.clone(), client_addr.clone());
                 
-                let response = NetworkMessage::HandshakeResponse {
-                    accepted: true,
-                    device_info: device_manager.create_device_info("vps-server".to_string()),
+                let response = NetworkMessage::AuthResponse {
+                    success: true,
+                    client_id: Some(client_id),
+                    message: "Authentication successful".to_string(),
                 };
                 
                 let response_data = serde_json::to_vec(&response)?;
                 stream.write_all(&response_data).await?;
             }
             
-            NetworkMessage::SyncRequest { device_id, files } => {
-                println!("Sync request from {} with {} files", device_id, files.len());
+            NetworkMessage::SyncRequest { client_id, files } => {
+                println!("Sync request from {} with {} files", client_id, files.len());
                 
                 let state_guard = state.read().await;
                 let server_files = state_guard.list_files();

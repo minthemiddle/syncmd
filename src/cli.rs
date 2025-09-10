@@ -1,6 +1,7 @@
+#![allow(dead_code)]
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use crate::security::DeviceCredentials;
 
 #[derive(Parser)]
 #[command(name = "syncmd")]
@@ -30,31 +31,16 @@ pub enum Commands {
         #[arg(long)]
         server: bool,
         
-        /// Enable peer discovery mode
-        #[arg(long)]
-        discover: bool,
-        
         /// Port to listen on (server mode)
         #[arg(long, default_value = "8080")]
         port: u16,
-        
-        /// Discovery port
-        #[arg(long, default_value = "8081")]
-        discovery_port: u16,
     },
     
-    /// List connected devices
-    ListDevices,
+    /// List connected clients
+    ListClients,
     
     /// Show current sync status
     Status,
-    
-    /// Discover other syncmd peers on the network
-    Discover {
-        /// Port for discovery (default: 8081)
-        #[arg(long, default_value = "8081")]
-        port: u16,
-    },
     
     /// Initialize a new sync configuration
     Init {
@@ -62,17 +48,13 @@ pub enum Commands {
         #[arg(short, long)]
         path: PathBuf,
         
-        /// Device name
-        #[arg(short, long, default_value = "syncmd-device")]
+        /// Client name
+        #[arg(short, long, default_value = "syncmd-client")]
         name: String,
         
-        /// Enable encryption (requires password)
+        /// Authentication token for server access
         #[arg(long)]
-        encryption: bool,
-        
-        /// Password for encryption
-        #[arg(long)]
-        password: Option<String>,
+        auth_token: Option<String>,
     },
 }
 
@@ -81,9 +63,7 @@ pub struct Config {
     pub device_id: String,
     pub device_name: String,
     pub sync_roots: Vec<SyncRoot>,
-    pub encryption_enabled: bool,
-    pub credentials: Option<DeviceCredentials>,
-    pub trusted_devices: Vec<String>,
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -124,11 +104,9 @@ impl Config {
     fn default() -> Self {
         Self {
             device_id: uuid::Uuid::new_v4().to_string(),
-            device_name: "syncmd-device".to_string(),
+            device_name: "syncmd-client".to_string(),
             sync_roots: Vec::new(),
-            encryption_enabled: false,
-            credentials: None,
-            trusted_devices: Vec::new(),
+            auth_token: None,
         }
     }
 

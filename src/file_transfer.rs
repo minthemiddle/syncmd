@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::types::{SyncError, FileMetadata};
 use std::path::{Path, PathBuf};
 use std::io::{Read, Write};
@@ -7,6 +9,7 @@ use std::time::Instant;
 
 const CHUNK_SIZE: usize = 64 * 1024; // 64KB chunks
 const MAX_RETRIES: u32 = 3;
+const MAX_CONCURRENT_TRANSFERS: usize = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileTransferHeader {
@@ -55,6 +58,22 @@ impl FileTransferManager {
         Self {
             active_transfers: std::collections::HashMap::new(),
         }
+    }
+
+    pub fn is_image_file(path: &Path) -> bool {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| matches!(ext.to_lowercase().as_str(), 
+                "jpg" | "jpeg" | "png" | "gif" | "svg" | "webp" | "bmp" | "ico"))
+            .unwrap_or(false)
+    }
+
+    pub fn is_markdown_file(path: &Path) -> bool {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| matches!(ext.to_lowercase().as_str(), 
+                "md" | "markdown" | "mdown" | "mkdn" | "mkd" | "mdwn" | "mdtxt" | "mdtext" | "text"))
+            .unwrap_or(false)
     }
 
     pub async fn send_file(

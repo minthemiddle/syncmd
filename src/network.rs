@@ -1,79 +1,77 @@
-use crate::types::{DeviceInfo, SyncError};
+#![allow(dead_code)]
+
+use crate::types::{ClientInfo, SyncError};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::net::{SocketAddr, IpAddr, Ipv4Addr, UdpSocket};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-pub struct DeviceManager {
-    devices: Arc<RwLock<HashMap<String, DeviceInfo>>>,
-    device_id: String,
-    device_name: String,
+pub struct ClientManager {
+    clients: Arc<RwLock<HashMap<String, ClientInfo>>>,
+    server_id: String,
+    auth_tokens: HashMap<String, String>, // token -> client_id
 }
 
-impl DeviceManager {
-    pub fn new(device_name: String) -> Self {
-        let device_id = Uuid::new_v4().to_string();
+impl ClientManager {
+    pub fn new() -> Self {
+        let server_id = Uuid::new_v4().to_string();
         Self {
-            devices: Arc::new(RwLock::new(HashMap::new())),
-            device_id,
-            device_name,
+            clients: Arc::new(RwLock::new(HashMap::new())),
+            server_id,
+            auth_tokens: HashMap::new(),
         }
     }
 
-    pub fn device_id(&self) -> &str {
-        &self.device_id
+    pub fn server_id(&self) -> &str {
+        &self.server_id
     }
 
-    pub fn device_name(&self) -> &str {
-        &self.device_name
+    pub fn generate_auth_token(&mut self, client_id: String, _client_name: String) -> String {
+        let token = format!("syncmd_{}", Uuid::new_v4().to_string());
+        self.auth_tokens.insert(token.clone(), client_id.clone());
+        token
     }
 
-    pub async fn register_device(&self, device_info: DeviceInfo) -> Result<(), SyncError> {
-        let mut devices = self.devices.write().await;
-        devices.insert(device_info.id.clone(), device_info);
+    pub fn validate_token(&self, token: &str) -> Option<String> {
+        self.auth_tokens.get(token).cloned()
+    }
+
+    pub async fn register_client(&self, client_info: ClientInfo) -> Result<(), SyncError> {
+        let mut clients = self.clients.write().await;
+        clients.insert(client_info.id.clone(), client_info);
         Ok(())
     }
 
-    pub async fn get_device(&self, device_id: &str) -> Option<DeviceInfo> {
-        let devices = self.devices.read().await;
-        devices.get(device_id).cloned()
+    pub async fn get_client(&self, client_id: &str) -> Option<ClientInfo> {
+        let clients = self.clients.read().await;
+        clients.get(client_id).cloned()
     }
 
-    pub async fn list_devices(&self) -> Vec<DeviceInfo> {
-        let devices = self.devices.read().await;
-        devices.values().cloned().collect()
+    pub async fn list_clients(&self) -> Vec<ClientInfo> {
+        let clients = self.clients.read().await;
+        clients.values().cloned().collect()
     }
 
-    pub async fn remove_device(&self, device_id: &str) -> Result<(), SyncError> {
-        let mut devices = self.devices.write().await;
-        devices.remove(device_id);
+    pub async fn remove_client(&self, client_id: &str) -> Result<(), SyncError> {
+        let mut clients = self.clients.write().await;
+        clients.remove(client_id);
         Ok(())
-    }
-
-    pub fn create_device_info(&self, address: String) -> DeviceInfo {
-        DeviceInfo {
-            id: self.device_id.clone(),
-            name: self.device_name.clone(),
-            address,
-            last_seen: chrono::Utc::now(),
-        }
     }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum NetworkMessage {
-    Handshake {
-        device_id: String,
-        device_name: String,
-        sync_root_hash: String,
+    Authenticate {
+        token: String,
+        client_name: String,
     },
-    HandshakeResponse {
-        accepted: bool,
-        device_info: DeviceInfo,
+    AuthResponse {
+        success: bool,
+        client_id: Option<String>,
+        message: String,
     },
     SyncRequest {
-        device_id: String,
+        client_id: String,
         files: Vec<crate::types::FileMetadata>,
     },
     SyncResponse {
@@ -98,14 +96,14 @@ pub enum NetworkMessage {
 
 #[derive(Clone)]
 pub struct NetworkManager {
-    device_manager: Arc<DeviceManager>,
+    client_manager: Arc<ClientManager>,
     server_address: String,
 }
 
 impl NetworkManager {
-    pub fn new(device_manager: Arc<DeviceManager>, server_address: String) -> Self {
+    pub fn new(client_manager: Arc<ClientManager>, server_address: String) -> Self {
         Self {
-            device_manager,
+            client_manager,
             server_address,
         }
     }
@@ -120,9 +118,9 @@ impl NetworkManager {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    let device_manager = self.device_manager.clone();
+                    let client_manager = self.client_manager.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_connection(stream, device_manager, addr.to_string()).await {
+                        if let Err(e) = Self::handle_connection(stream, client_manager, addr.to_string()).await {
                             eprintln!("Connection error: {}", e);
                         }
                     });
@@ -134,7 +132,7 @@ impl NetworkManager {
 
     async fn handle_connection(
         mut stream: tokio::net::TcpStream,
-        device_manager: Arc<DeviceManager>,
+        client_manager: Arc<ClientManager>,
         client_addr: String,
     ) -> Result<(), SyncError> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -149,28 +147,45 @@ impl NetworkManager {
         let message: NetworkMessage = serde_json::from_slice(&buffer[..n])?;
         
         match message {
-            NetworkMessage::Handshake { device_id, device_name, sync_root_hash: _ } => {
-                println!("Handshake from {} ({})", device_name, device_id);
+            NetworkMessage::Authenticate { token, client_name } => {
+                println!("Authentication request from: {}", client_name);
                 
-                let device_info = DeviceInfo {
-                    id: device_id.clone(),
-                    name: device_name,
-                    address: client_addr,
-                    last_seen: chrono::Utc::now(),
-                };
-                
-                device_manager.register_device(device_info).await?;
-                
-                let response = NetworkMessage::HandshakeResponse {
-                    accepted: true,
-                    device_info: device_manager.create_device_info("server".to_string()),
-                };
-                
-                let response_data = serde_json::to_vec(&response)?;
-                stream.write_all(&response_data).await?;
+                if let Some(client_id) = client_manager.validate_token(&token) {
+                    println!("Authentication successful for client: {}", client_id);
+                    
+                    let client_info = ClientInfo {
+                        id: client_id.clone(),
+                        name: client_name,
+                        address: client_addr,
+                        last_seen: chrono::Utc::now(),
+                        auth_token: token,
+                    };
+                    
+                    client_manager.register_client(client_info).await?;
+                    
+                    let response = NetworkMessage::AuthResponse {
+                        success: true,
+                        client_id: Some(client_id),
+                        message: "Authentication successful".to_string(),
+                    };
+                    
+                    let response_data = serde_json::to_vec(&response)?;
+                    stream.write_all(&response_data).await?;
+                } else {
+                    println!("Authentication failed for client: {}", client_name);
+                    
+                    let response = NetworkMessage::AuthResponse {
+                        success: false,
+                        client_id: None,
+                        message: "Invalid authentication token".to_string(),
+                    };
+                    
+                    let response_data = serde_json::to_vec(&response)?;
+                    stream.write_all(&response_data).await?;
+                }
             }
-            NetworkMessage::SyncRequest { device_id, files } => {
-                println!("Sync request from {} with {} files", device_id, files.len());
+            NetworkMessage::SyncRequest { client_id, files } => {
+                println!("Sync request from {} with {} files", client_id, files.len());
                 
                 // Get server's current file state
                 // For now, we'll just acknowledge the sync request
@@ -218,20 +233,20 @@ impl NetworkManager {
         Ok(stream)
     }
 
-    pub async fn send_handshake(
+    pub async fn send_authentication(
         &self,
         stream: &mut tokio::net::TcpStream,
-        sync_root_hash: String,
+        auth_token: String,
+        client_name: String,
     ) -> Result<(), SyncError> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let handshake = NetworkMessage::Handshake {
-            device_id: self.device_manager.device_id().to_string(),
-            device_name: self.device_manager.device_name().to_string(),
-            sync_root_hash,
+        let auth_request = NetworkMessage::Authenticate {
+            token: auth_token,
+            client_name,
         };
 
-        let data = serde_json::to_vec(&handshake)?;
+        let data = serde_json::to_vec(&auth_request)?;
         stream.write_all(&data).await?;
 
         let mut response_buffer = vec![0u8; 1024];
@@ -239,72 +254,15 @@ impl NetworkManager {
         
         let response: NetworkMessage = serde_json::from_slice(&response_buffer[..n])?;
         
-        if let NetworkMessage::HandshakeResponse { accepted, device_info } = response {
-            if accepted {
-                self.device_manager.register_device(device_info).await?;
+        if let NetworkMessage::AuthResponse { success, client_id: _, message } = response {
+            if success {
+                println!("{}", message);
                 Ok(())
             } else {
-                Err(SyncError::Network("Handshake rejected".to_string()))
+                Err(SyncError::Network(message))
             }
         } else {
-            Err(SyncError::Network("Invalid handshake response".to_string()))
+            Err(SyncError::Network("Invalid authentication response".to_string()))
         }
-    }
-
-    pub async fn discover_peers(&self, port: u16) -> Result<Vec<SocketAddr>, SyncError> {
-        let socket = UdpSocket::bind("0.0.0.0:0")?;
-        socket.set_broadcast(true)?;
-        
-        let broadcast_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), port);
-        let discovery_msg = format!("SYNCMD_DISCOVER:{}", self.device_manager.device_id());
-        
-        socket.send_to(discovery_msg.as_bytes(), broadcast_addr)?;
-        
-        let mut peers = Vec::new();
-        let mut buffer = [0u8; 1024];
-        
-        // Wait for responses
-        socket.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
-        
-        while let Ok((size, addr)) = socket.recv_from(&mut buffer) {
-            if size > 0 {
-                let response = String::from_utf8_lossy(&buffer[..size]);
-                if response.starts_with("SYNCMD_RESPONSE:") {
-                    peers.push(addr);
-                }
-            }
-        }
-        
-        Ok(peers)
-    }
-
-    pub async fn start_discovery_server(&self, port: u16) -> Result<(), SyncError> {
-        let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
-        let device_manager = self.device_manager.clone();
-        
-        println!("Peer discovery listening on port {}", port);
-        
-        tokio::spawn(async move {
-            let mut buffer = [0u8; 1024];
-            loop {
-                match socket.recv_from(&mut buffer) {
-                    Ok((size, addr)) => {
-                        if size > 0 {
-                            let msg = String::from_utf8_lossy(&buffer[..size]);
-                            if let Some(peer_id) = msg.strip_prefix("SYNCMD_DISCOVER:") {
-                                if peer_id != device_manager.device_id() {
-                                    println!("Discovered peer {} from {}", peer_id, addr);
-                                    let response = format!("SYNCMD_RESPONSE:{}", device_manager.device_id());
-                                    let _ = socket.send_to(response.as_bytes(), addr);
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        
-        Ok(())
     }
 }

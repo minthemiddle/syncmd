@@ -27,11 +27,12 @@ pub enum SyncOperation {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DeviceInfo {
+pub struct ClientInfo {
     pub id: String,
     pub name: String,
     pub address: String,
     pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub auth_token: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -46,12 +47,15 @@ pub enum SyncError {
     Serialization(#[from] serde_json::Error),
     
     #[error("Network error: {0}")]
+    #[allow(dead_code)]
     Network(String),
     
     #[error("File not found: {0}")]
+    #[allow(dead_code)]
     NotFound(PathBuf),
     
     #[error("Conflict detected: {0}")]
+    #[allow(dead_code)]
     Conflict(String),
     
     #[error("Path strip error: {0}")]
