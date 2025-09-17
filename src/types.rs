@@ -35,6 +35,69 @@ pub struct ClientInfo {
     pub auth_token: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum FileCategory {
+    Text,
+    Code,
+    Image,
+    Document,
+    Data,
+    Config,
+    Other,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileAnalysis {
+    pub line_count: usize,
+    pub word_count: usize,
+    pub character_count: usize,
+    pub is_binary: bool,
+    pub encoding: String,
+    pub file_type: FileCategory,
+}
+
+impl Default for FileAnalysis {
+    fn default() -> Self {
+        Self {
+            line_count: 0,
+            word_count: 0,
+            character_count: 0,
+            is_binary: false,
+            encoding: "utf-8".to_string(),
+            file_type: FileCategory::Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileChange {
+    pub path: PathBuf,
+    pub old_metadata: Option<FileMetadata>,
+    pub new_metadata: Option<FileMetadata>,
+    pub analysis: FileAnalysis,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DetailedFileChanges {
+    pub added: Vec<FileChange>,
+    pub modified: Vec<FileChange>,
+    pub deleted: Vec<FileChange>,
+    pub renamed: Vec<FileChange>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TransferProgress {
+    pub transfer_id: String,
+    pub bytes_transferred: u64,
+    pub total_bytes: u64,
+    pub progress: f64,
+    pub speed_mbps: f64,
+    pub elapsed_seconds: f64,
+    pub estimated_remaining_seconds: f64,
+    pub chunks_received: u32,
+    pub total_chunks: u32,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
     #[error("IO error: {0}")]
@@ -66,4 +129,22 @@ pub enum SyncError {
     
     #[error("File watcher error: {0}")]
     Watcher(#[from] notify::Error),
+    
+    #[error("Authentication error: {0}")]
+    Auth(String),
+    
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+    
+    #[error("Token expired")]
+    TokenExpired,
+    
+    #[error("Token revoked")]
+    TokenRevoked,
+    
+    #[error("Invalid token")]
+    InvalidToken,
+    
+    #[error("Session expired")]
+    SessionExpired,
 }

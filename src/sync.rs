@@ -130,14 +130,34 @@ impl SyncEngine {
     }
 
     fn merge_text_content(local: &str, remote: &str, base: &str) -> Result<String, SyncError> {
-        // For MVP, use a simple strategy: if base is empty, concatenate
-        // Otherwise, use remote content (simple conflict resolution)
+        // Use simple merge for now (similar crate not available)
         if base.is_empty() {
             return Ok(format!("{}\n\n{}", local, remote));
         }
 
-        // For now, prefer remote content (can be improved later)
-        Ok(remote.to_string())
+        // Simple conflict detection and resolution
+        let mut result = String::new();
+        
+        // Check if there are significant changes in both versions
+        let local_changes = local.lines().count() != base.lines().count();
+        let remote_changes = remote.lines().count() != base.lines().count();
+        
+        if local_changes && remote_changes {
+            // Both sides have changes, use conflict markers
+            result.push_str("<<<<<<< LOCAL\n");
+            result.push_str(local);
+            result.push_str("\n=======\n");
+            result.push_str(remote);
+            result.push_str("\n>>>>>>> REMOTE\n");
+        } else if remote_changes {
+            // Only remote has changes
+            result.push_str(remote);
+        } else {
+            // Only local has changes or no changes
+            result.push_str(local);
+        }
+        
+        Ok(result)
     }
 
     pub fn calculate_bidirectional_sync(
@@ -203,14 +223,77 @@ impl SyncEngine {
         local_meta: &FileMetadata,
         remote_meta: &FileMetadata,
     ) -> Result<String, SyncError> {
-        // Simple conflict resolution: newer version wins
+        // Enhanced conflict resolution with multiple strategies
         if local_meta.modified > remote_meta.modified {
-            Ok(local_content.to_string())
+            // Local is newer, but still try to merge if there are conflicts
+            if Self::has_significant_changes(local_content, base_content) && 
+               Self::has_significant_changes(remote_content, base_content) {
+                // Both sides have significant changes, attempt merge
+                match Self::merge_markdown_content(local_content, remote_content, base_content) {
+                    Ok(merged) => Ok(merged),
+                    Err(_) => Ok(local_content.to_string()), // Fall back to local
+                }
+            } else {
+                Ok(local_content.to_string())
+            }
         } else if remote_meta.modified > local_meta.modified {
-            Ok(remote_content.to_string())
+            // Remote is newer, but still try to merge if there are conflicts
+            if Self::has_significant_changes(local_content, base_content) && 
+               Self::has_significant_changes(remote_content, base_content) {
+                // Both sides have significant changes, attempt merge
+                match Self::merge_markdown_content(local_content, remote_content, base_content) {
+                    Ok(merged) => Ok(merged),
+                    Err(_) => Ok(remote_content.to_string()), // Fall back to remote
+                }
+            } else {
+                Ok(remote_content.to_string())
+            }
         } else {
             // Same timestamp, try to merge
             Self::merge_markdown_content(local_content, remote_content, base_content)
         }
+    }
+
+    fn has_significant_changes(content: &str, base: &str) -> bool {
+        // Simple change detection (similar crate not available)
+        if base.is_empty() {
+            return !content.is_empty();
+        }
+        
+        // Count line differences
+        let base_lines = base.lines().count();
+        let content_lines = content.lines().count();
+        
+        // Consider significant if more than 2 lines different
+        (base_lines as i32 - content_lines as i32).abs() > 2
+    }
+
+    pub fn create_sync_report(
+        &self,
+        local_operations: &[SyncOperation],
+        remote_operations: &[SyncOperation],
+    ) -> String {
+        let mut report = String::new();
+        report.push_str("=== Sync Report ===\n\n");
+        
+        report.push_str("Local Operations:\n");
+        for op in local_operations {
+            match op {
+                SyncOperation::Add(meta) => report.push_str(&format!("  + Add: {:?}\n", meta.path)),
+                SyncOperation::Update(meta) => report.push_str(&format!("  * Update: {:?}\n", meta.path)),
+                SyncOperation::Delete(path) => report.push_str(&format!("  - Delete: {:?}\n", path)),
+            }
+        }
+        
+        report.push_str("\nRemote Operations:\n");
+        for op in remote_operations {
+            match op {
+                SyncOperation::Add(meta) => report.push_str(&format!("  + Add: {:?}\n", meta.path)),
+                SyncOperation::Update(meta) => report.push_str(&format!("  * Update: {:?}\n", meta.path)),
+                SyncOperation::Delete(path) => report.push_str(&format!("  - Delete: {:?}\n", path)),
+            }
+        }
+        
+        report
     }
 }

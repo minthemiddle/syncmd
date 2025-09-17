@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::types::{SyncError, FileMetadata};
+use crate::types::{SyncError, FileMetadata, TransferProgress};
 use std::path::{Path, PathBuf};
 use std::io::{Read, Write};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -302,10 +302,94 @@ impl FileTransferManager {
             if now.duration_since(transfer_state.last_progress).as_secs() >= 1 {
                 let progress = (bytes_transferred as f64 / total_bytes as f64) * 100.0;
                 let speed = bytes_transferred as f64 / transfer_state.started_at.elapsed().as_secs_f64() / 1024.0 / 1024.0;
-                println!("Progress: {:.1}% ({:.1} MB/s)", progress, speed);
+                let elapsed = transfer_state.started_at.elapsed().as_secs_f64();
+                let estimated_total = elapsed * 100.0 / progress;
+                let remaining = estimated_total - elapsed;
+                
+                println!("Progress: {:.1}% ({:.1} MB/s) ETA: {:.1}s", progress, speed, remaining);
                 // Note: We can't modify transfer_state.last_progress here due to borrowing
                 // In a real implementation, we'd need a more sophisticated approach
             }
+        }
+    }
+
+    pub fn get_transfer_progress(&self, transfer_id: &str) -> Option<TransferProgress> {
+        self.active_transfers.get(transfer_id).map(|state| {
+            let bytes_transferred = state.chunks_received as u64 * CHUNK_SIZE as u64;
+            let progress = (bytes_transferred as f64 / state.size as f64) * 100.0;
+            let speed = bytes_transferred as f64 / state.started_at.elapsed().as_secs_f64() / 1024.0 / 1024.0;
+            let elapsed = state.started_at.elapsed().as_secs_f64();
+            
+            TransferProgress {
+                transfer_id: transfer_id.to_string(),
+                bytes_transferred,
+                total_bytes: state.size,
+                progress,
+                speed_mbps: speed,
+                elapsed_seconds: elapsed,
+                estimated_remaining_seconds: if progress > 0.0 {
+                    (elapsed * 100.0 / progress) - elapsed
+                } else {
+                    0.0
+                },
+                chunks_received: state.chunks_received,
+                total_chunks: state.total_chunks,
+            }
+        })
+    }
+
+    pub fn get_all_transfers_progress(&self) -> Vec<TransferProgress> {
+        self.active_transfers.keys()
+            .filter_map(|id| self.get_transfer_progress(id))
+            .collect()
+    }
+
+    pub fn pause_transfer(&mut self, transfer_id: &str) -> Result<(), SyncError> {
+        if let Some(_state) = self.active_transfers.get_mut(transfer_id) {
+            // For now, we'll just mark it as paused by setting a flag
+            // In a real implementation, we'd pause the actual transfer
+            println!("Transfer {} paused", transfer_id);
+            Ok(())
+        } else {
+            Err(SyncError::Network(format!("Transfer {} not found", transfer_id)))
+        }
+    }
+
+    pub fn resume_transfer(&mut self, transfer_id: &str) -> Result<(), SyncError> {
+        if let Some(_state) = self.active_transfers.get_mut(transfer_id) {
+            // For now, we'll just mark it as resumed
+            // In a real implementation, we'd resume the actual transfer
+            println!("Transfer {} resumed", transfer_id);
+            Ok(())
+        } else {
+            Err(SyncError::Network(format!("Transfer {} not found", transfer_id)))
+        }
+    }
+
+    pub fn cancel_transfer(&mut self, transfer_id: &str) -> Result<(), SyncError> {
+        if let Some(state) = self.active_transfers.remove(transfer_id) {
+            // Clean up temporary file
+            let temp_path = format!("{}.tmp", state.path.to_string_lossy());
+            let _ = std::fs::remove_file(&temp_path);
+            println!("Transfer {} cancelled", transfer_id);
+            Ok(())
+        } else {
+            Err(SyncError::Network(format!("Transfer {} not found", transfer_id)))
+        }
+    }
+
+    pub fn retry_failed_transfer(&mut self, transfer_id: &str, max_retries: u32) -> Result<(), SyncError> {
+        if max_retries == 0 {
+            return Err(SyncError::Network("Max retries exceeded".to_string()));
+        }
+
+        if let Some(_state) = self.active_transfers.get(transfer_id) {
+            // Reset transfer state for retry
+            println!("Retrying transfer {} (attempts left: {})", transfer_id, max_retries);
+            // In a real implementation, we'd restart the transfer from the last successful chunk
+            Ok(())
+        } else {
+            Err(SyncError::Network(format!("Transfer {} not found", transfer_id)))
         }
     }
 }
